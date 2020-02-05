@@ -22,7 +22,7 @@ from sys import exit
 
 TEMP_DIR = "temp"
 TEMP_DIR_IMPROC = TEMP_DIR + '\\' + "improc"
-PDF2IMAGE_DPI = 100
+PDF2IMAGE_DPI = 200
 REGISTER_KEY_STRING = "Poling Station Register"
 CSV_HEADER = "id,marked,code,file"
 RESULT_FILE = "results.csv"
@@ -83,19 +83,65 @@ def correct_skew(image_path):
     return outpath
 
 
+def mask_data_to_ignore(image_path):
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    # cv2.imshow('edges', edges)
+    minLineLength = 10
+    lines = cv2.HoughLinesP(image=edges, rho=1, theta=np.pi / 180, threshold=1, lines=np.array([]),
+                            minLineLength=minLineLength, maxLineGap=500)
+    a, b, c = lines.shape
+    mask = np.zeros((img.shape[0], img.shape[1], 3), np.uint8)
+    for i in range(a):
+        x1 = lines[i][0][0]
+        y1 = lines[i][0][1]
+        x2 = lines[i][0][2]
+        y2 = lines[i][0][3]
+
+        if x1 < img.shape[0]/1.9 or x2 < img.shape[0]/1.9:
+            continue
+        angle = np.arctan2(y2 - y1, x2 - x1) * 180. / np.pi
+        cv2.line(mask, (x1, x2), (x2, y2), (0, 0, 255), 3, cv2.LINE_AA)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=10)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.erode(mask, kernel, iterations=10)
+
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    for c in contours:
+        rect = cv2.boundingRect(c)
+        x, y, w, h = rect
+
+        cv2.rectangle(img, (x, 0), (x + w, 0 + int(img.shape[0]/1)), (255, 255, 255), thickness=cv2.FILLED)
+        x = x - 201
+        cv2.rectangle(img, (x, 0), (x + w, 0 + int(img.shape[0] / 1.1)), (255, 255, 255), thickness=cv2.FILLED)
+        cv2.rectangle(img, (0, 0), (0 + int(img.shape[1]), 0 + int(img.shape[0] / 7)), (255, 255, 255), thickness=cv2.FILLED)
+
+    # cv2.imshow('frame', img)
+    # cv2.imshow('mak', mask)
+    # cv2.waitKey(0)
+    # cv2.waitKey(150)
+    outpath = "%s\\%s_masked.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
+    cv2.imwrite(outpath, img)
+
+
 def pre_process_images():
     print("pre processing images...")
     images = glob.glob("%s\\*.jpg" % TEMP_DIR)
     print("found %d images in temp folder." % (len(images)))
     print("rotation skew correction...")
-    for image_path in tqdm(images, total=len(images), initial=1):
+    # for image_path in tqdm(images, total=len(images), initial=1):
+    for image_path in images:
         correct_skew(image_path)
+        mask_data_to_ignore(image_path)
     print('\t')
 
 
 def images_to_text():
     print("processing images...")
-    images = glob.glob("%s\\*.jpg" % TEMP_DIR_IMPROC)
+    images = glob.glob("%s\\*masked.jpg" % TEMP_DIR_IMPROC)
     print("found %d preprocessed images." % (len(images)))
     print("looking for text...")
     for image_path in tqdm(images, total=len(images), initial=1):
