@@ -19,13 +19,19 @@ import pytesseract
 import re
 import imutils
 from sys import exit
-from numpy import ones,vstack
+from numpy import ones, vstack
 from numpy.linalg import lstsq
 import math
+import tesserocr as tr
+from PIL import Image
+import warnings
+warnings.filterwarnings("ignore")
 
 
+CHAR_TRAINING_DIR = "training"
 TEMP_DIR = "temp"
 TEMP_DIR_IMPROC = TEMP_DIR + '\\' + "improc"
+TEMP_DIR_IMPROC_ROWS = TEMP_DIR_IMPROC + '\\' + "rows"
 PDF2IMAGE_DPI = 200
 MASK_OFFSET = 800
 REGISTER_KEY_STRING_1 = "Station Register"
@@ -41,8 +47,10 @@ def init_temp_folder():
     except (OSError, FileNotFoundError) as e:
         print(e)
     print("creating temporary folder...")
+    pathlib.Path(CHAR_TRAINING_DIR).mkdir(parents=True, exist_ok=True)
     pathlib.Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
     pathlib.Path(TEMP_DIR_IMPROC).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(TEMP_DIR_IMPROC_ROWS).mkdir(parents=True, exist_ok=True)
 
 
 def pre_process_file(files):
@@ -125,7 +133,7 @@ def mask_data_to_ignore(image_path):
                     continue
                 x_coords, y_coords = zip(*points)
                 A = vstack([x_coords, ones(len(x_coords))]).T
-                m, c = lstsq(A, y_coords)[0]
+                m, c = lstsq(A, y_coords, rcond=None)[0]
 
                 x1_, y1_ = x1, int(m*(x1 - 90000) + c)
                 x2_, y2_ = x2, int(m*(x2 + 90000) + c)
@@ -138,7 +146,7 @@ def mask_data_to_ignore(image_path):
                 if x1 < image.shape[0]/2:
                     cv2.line(line_image, (x1_, y1_), (x2_, y2_), (0, 0, 255), 5)
                     cv2.line(image, (x1, y1_), (x2_, y2_), (0, 0, 255), 5)
-                    for offset in range(0, 160):
+                    for offset in range(0, 450):
                         cv2.line(line_image, (x1_+offset, y1_), (x2_+offset, y2_), (255, 255, 255), 5)
                         cv2.line(image, (x1_+offset, y1_), (x2_+offset, y2_), (255, 255, 255), 5)
                 else:
@@ -149,7 +157,7 @@ def mask_data_to_ignore(image_path):
                     offset = 680
                     cv2.line(line_image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
                     cv2.line(image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
-                    for offset in range(540, 680):
+                    for offset in range(250, 680):
                         cv2.line(line_image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
                         cv2.line(image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
 
@@ -171,25 +179,87 @@ def mask_data_to_ignore(image_path):
         if len(approx) == 4:
             cv2.drawContours(mask, [cnt], 0, (0, 0, 0), -1)
 
-    cv2.rectangle(mask, (0, 0), (0 + int(mask.shape[1]), int(mask.shape[0] / 5.7)), (0, 0, 0), thickness=cv2.FILLED)
+    cv2.rectangle(mask, (0, 0), (0 + int(mask.shape[1]), int(mask.shape[0] / 5.7)-20), (0, 0, 0), thickness=cv2.FILLED)
 
     cv2.rectangle(mask, (0, int(mask.shape[0]/1.1)), (int(mask.shape[1]), int(mask.shape[0]/1.1)+1600), (0, 0, 0), thickness=cv2.FILLED)
 
-    mask_s = cv2.resize(mask, (640, 820))
+    # mask_s = cv2.resize(mask, (640, 820))
 
-    # cv2.imshow('mask', mask_s)
     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
 
     result = gray.copy()
     result[mask == 0] = 255
+
+    rows1, rows2 = find_rows(result, image_path)
+
     # img_s = cv2.resize(result, (640, 820))
     # cv2.imshow('result', img_s)
-
+    # cv2.imshow('mask', mask_s)
+    #
     # cv2.waitKey(0)
 
     outpath = "%s\\%s_masked.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
     io.imsave(outpath, result.astype(np.uint8))
+
+    outpath = "%s\\%s_rows1.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
+    io.imsave(outpath, rows1.astype(np.uint8))
+
+    outpath = "%s\\%s_rows2.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
+    io.imsave(outpath, rows2.astype(np.uint8))
     return outpath
+
+
+def find_rows(result, image_path):
+    cv_img = result.copy()
+    cv_img = cv2.cvtColor(cv_img, cv2.COLOR_GRAY2RGB)
+    x1, y1 = 0, 0
+    x2, y2 = 500, cv_img.shape[0]
+
+    cv_img_1 = cv_img[y1:y2, x1:x2]
+    cv_img_2 = cv_img[y1:y2, x1+700:x2+700]
+
+    cv_img_1_o = cv_img_1.copy()
+    cv_img_2_o = cv_img_2.copy()
+    api = tr.PyTessBaseAPI(path="C:\Program Files (x86)\Tesseract-OCR")
+    try:
+        pil_img = Image.fromarray(cv2.cvtColor(cv_img_1, cv2.COLOR_BGR2RGB))
+        api.SetImage(pil_img)
+        boxes = api.GetComponentImages(tr.RIL.TEXTLINE, False)
+        text = api.GetUTF8Text()
+        for i, (im, box, _, _) in enumerate(boxes):
+            x, y, w, h = box['x'], box['y'], box['w'], box['h']
+            if h < 17 or h > 40:
+                continue
+            x = 0
+            w = cv_img_1.shape[1]-10
+            cv2.rectangle(cv_img_1, (x, y), (x + w, y + h), color=(0, 255, 0), thickness=2)
+            outpath = "%s\\%s_left_%03d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
+            roi = cv_img_1_o[y-5:y+h, x:x+w+5]
+            io.imsave(outpath, roi.astype(np.uint8))
+
+        pil_img = Image.fromarray(cv2.cvtColor(cv_img_2, cv2.COLOR_BGR2RGB))
+        api.SetImage(pil_img)
+        boxes = api.GetComponentImages(tr.RIL.TEXTLINE, False)
+        text = api.GetUTF8Text()
+        for i, (im, box, _, _) in enumerate(boxes):
+            x, y, w, h = box['x'], box['y'], box['w'], box['h']
+            if h < 20 or h > 35:
+                continue
+            x = 0
+            w = cv_img_1.shape[1]-10
+            cv2.rectangle(cv_img_2, (x, y), (x + w, y + h), color=(0, 255, 0), thickness=3)
+            outpath = "%s\\%s_right_%03d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
+            roi = cv_img_2_o[y-5:y+h, x:x+w+5]
+            io.imsave(outpath, roi.astype(np.uint8))
+    finally:
+        api.End()
+
+    # cv_img1_s = cv2.resize(cv_img_1, (240, 820))
+    # cv2.imshow('cv_img1_s', cv_img1_s)
+    # cv_img2_s = cv2.resize(cv_img_2, (240, 820))
+    # cv2.imshow('cv_img2_s', cv_img2_s)
+    return cv_img_1, cv_img_2
+
 
 def correct_skew(image_path):
     image = io.imread(image_path)
@@ -202,15 +272,29 @@ def correct_skew(image_path):
     io.imsave(outpath, rotated.astype(np.uint8))
     return outpath
 
+
 def pre_process_images():
     print("pre processing images...")
     images = glob.glob("%s\\*.jpg" % TEMP_DIR)
     print("found %d images in temp folder." % (len(images)))
-    print("rotation skew correction...")
     # for image_path in tqdm(images, total=len(images), initial=1):
     for image_path in images:
         image_path_deskew = correct_skew(image_path)
         mask_data_to_ignore(image_path_deskew)
+    print('\t')
+
+
+def extract_chars(image_path):
+    print(0)
+
+
+def build_training_set_from_rows():
+    print("building training sets...")
+    images = glob.glob("%s\\*.jpg" % CHAR_TRAINING_DIR)
+    print("found %d images in rows folder." % (len(images)))
+    # for image_path in tqdm(images, total=len(images), initial=1):
+    for image_path in images:
+        extract_chars(image_path)
     print('\t')
 
 
