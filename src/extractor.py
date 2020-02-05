@@ -17,13 +17,20 @@ from skimage.color import rgb2gray
 from deskew import determine_skew
 import pytesseract
 import re
+import imutils
 from sys import exit
+from numpy import ones,vstack
+from numpy.linalg import lstsq
+import math
 
 
 TEMP_DIR = "temp"
 TEMP_DIR_IMPROC = TEMP_DIR + '\\' + "improc"
 PDF2IMAGE_DPI = 200
-REGISTER_KEY_STRING = "Poling Station Register"
+MASK_OFFSET = 800
+REGISTER_KEY_STRING_1 = "Station Register"
+REGISTER_KEY_STRING_2 = "Station"
+REGISTER_KEY_STRING_3 = "Register"
 CSV_HEADER = "id,marked,code,file"
 RESULT_FILE = "results.csv"
 
@@ -71,6 +78,119 @@ def pdf_to_images():
         print("error! not enough memory to process file!", e)
 
 
+def mask_data_to_ignore(image_path):
+    image = io.imread(image_path)
+    rotated = np.array(image, dtype=np.uint8)
+    gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
+    mask = np.zeros((image.shape[0], image.shape[1], 3), np.uint8)
+    ret, thresh = cv2.threshold(gray, 127, 255, 1)
+
+    contours, h = cv2.findContours(thresh, 1, 2)
+
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True)
+        if cnt[0][0][1] > image.shape[0]/2:
+            continue
+
+        area = cv2.contourArea(cnt)
+        if area < 15000:
+            continue
+
+        if len(approx) == 4:
+            cv2.drawContours(mask, [cnt], 0, (255, 255, 255), -1)
+
+
+    gray_mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    kernel_size = 5
+    blur_gray = cv2.GaussianBlur(gray_mask, (kernel_size, kernel_size), 0)
+    low_threshold = 50
+    high_threshold = 150
+    edges = cv2.Canny(blur_gray, low_threshold, high_threshold)
+    rho = 1  # distance resolution in pixels of the Hough grid
+    theta = np.pi / 180  # angular resolution in radians of the Hough grid
+    threshold = 15  # minimum number of votes (intersections in Hough grid cell)
+    min_line_length = 2  # minimum number of pixels making up a line
+    max_line_gap = 0  # maximum gap in pixels between connectable line segments
+    line_image = np.copy(mask) * 0  # creating a blank to draw lines on
+    # Run Hough on edge detected image
+    # Output "lines" is an array containing endpoints of detected line segments
+    lines = cv2.HoughLinesP(edges, rho, theta, threshold, np.array([]),
+                            min_line_length, max_line_gap)
+    if lines is not None:
+
+        for line in lines:
+            for x1, y1, x2, y2 in line:
+                points = [(x1, y1), (x2, y2)]
+                if x1 > 600 and x1 < 1200:
+                    continue
+                x_coords, y_coords = zip(*points)
+                A = vstack([x_coords, ones(len(x_coords))]).T
+                m, c = lstsq(A, y_coords)[0]
+
+                x1_, y1_ = x1, int(m*(x1 - 90000) + c)
+                x2_, y2_ = x2, int(m*(x2 + 90000) + c)
+                angle = np.arctan2(y2_ - y1_, x2_ - x1_) * 180. / np.pi
+
+                if int(angle) != 90:
+                    continue
+                x1_ = x1_ - 40
+                x2_ = x2_ - 40
+                if x1 < image.shape[0]/2:
+                    cv2.line(line_image, (x1_, y1_), (x2_, y2_), (0, 0, 255), 5)
+                    cv2.line(image, (x1, y1_), (x2_, y2_), (0, 0, 255), 5)
+                    for offset in range(0, 160):
+                        cv2.line(line_image, (x1_+offset, y1_), (x2_+offset, y2_), (255, 255, 255), 5)
+                        cv2.line(image, (x1_+offset, y1_), (x2_+offset, y2_), (255, 255, 255), 5)
+                else:
+                    # cv2.line(line_image, (x1_, y1_), (x2_, y2_), (0, 0, 255), 5)
+                    # cv2.line(image, (x1_, y1_), (x2_, y2_), (0, 0, 255), 5)
+                    x1_ = x1_ + 20
+                    x2_ = x2_ + 20
+                    offset = 680
+                    cv2.line(line_image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
+                    cv2.line(image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
+                    for offset in range(540, 680):
+                        cv2.line(line_image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
+                        cv2.line(image, (x1_-offset, y1_), (x2_-offset, y2_), (255, 255, 255), 5)
+
+                # cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 0), 5)
+
+    mask = cv2.addWeighted(mask, 0.8, line_image, 1, 0)
+
+    ret, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True)
+        if cnt[0][0][1] > image.shape[0]/2:
+            continue
+
+        area = cv2.contourArea(cnt)
+        if area < 15000:
+            continue
+
+        if len(approx) == 4:
+            cv2.drawContours(mask, [cnt], 0, (0, 0, 0), -1)
+
+    cv2.rectangle(mask, (0, 0), (0 + int(mask.shape[1]), int(mask.shape[0] / 5.7)), (0, 0, 0), thickness=cv2.FILLED)
+
+    cv2.rectangle(mask, (0, int(mask.shape[0]/1.1)), (int(mask.shape[1]), int(mask.shape[0]/1.1)+1600), (0, 0, 0), thickness=cv2.FILLED)
+
+    mask_s = cv2.resize(mask, (640, 820))
+
+    # cv2.imshow('mask', mask_s)
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+
+    result = gray.copy()
+    result[mask == 0] = 255
+    # img_s = cv2.resize(result, (640, 820))
+    # cv2.imshow('result', img_s)
+
+    # cv2.waitKey(0)
+
+    outpath = "%s\\%s_masked.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
+    io.imsave(outpath, result.astype(np.uint8))
+    return outpath
+
 def correct_skew(image_path):
     image = io.imread(image_path)
     grayscale = rgb2gray(image)
@@ -82,51 +202,6 @@ def correct_skew(image_path):
     io.imsave(outpath, rotated.astype(np.uint8))
     return outpath
 
-
-def mask_data_to_ignore(image_path):
-    img = cv2.imread(image_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    # cv2.imshow('edges', edges)
-    minLineLength = 10
-    lines = cv2.HoughLinesP(image=edges, rho=1, theta=np.pi / 180, threshold=1, lines=np.array([]),
-                            minLineLength=minLineLength, maxLineGap=500)
-    a, b, c = lines.shape
-    mask = np.zeros((img.shape[0], img.shape[1], 3), np.uint8)
-    for i in range(a):
-        x1 = lines[i][0][0]
-        y1 = lines[i][0][1]
-        x2 = lines[i][0][2]
-        y2 = lines[i][0][3]
-
-        if x1 < img.shape[0]/1.9 or x2 < img.shape[0]/1.9:
-            continue
-        angle = np.arctan2(y2 - y1, x2 - x1) * 180. / np.pi
-        cv2.line(mask, (x1, x2), (x2, y2), (0, 0, 255), 3, cv2.LINE_AA)
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=10)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.erode(mask, kernel, iterations=10)
-
-    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    for c in contours:
-        rect = cv2.boundingRect(c)
-        x, y, w, h = rect
-
-        cv2.rectangle(img, (x, 0), (x + w, 0 + int(img.shape[0]/1)), (255, 255, 255), thickness=cv2.FILLED)
-        x = x - 201
-        cv2.rectangle(img, (x, 0), (x + w, 0 + int(img.shape[0] / 1.1)), (255, 255, 255), thickness=cv2.FILLED)
-        cv2.rectangle(img, (0, 0), (0 + int(img.shape[1]), 0 + int(img.shape[0] / 7)), (255, 255, 255), thickness=cv2.FILLED)
-
-    # cv2.imshow('frame', img)
-    # cv2.imshow('mak', mask)
-    # cv2.waitKey(0)
-    # cv2.waitKey(150)
-    outpath = "%s\\%s_masked.jpg" % (TEMP_DIR_IMPROC, image_path.split('\\')[-1].split('.')[0])
-    cv2.imwrite(outpath, img)
-
-
 def pre_process_images():
     print("pre processing images...")
     images = glob.glob("%s\\*.jpg" % TEMP_DIR)
@@ -134,14 +209,14 @@ def pre_process_images():
     print("rotation skew correction...")
     # for image_path in tqdm(images, total=len(images), initial=1):
     for image_path in images:
-        correct_skew(image_path)
-        mask_data_to_ignore(image_path)
+        image_path_deskew = correct_skew(image_path)
+        mask_data_to_ignore(image_path_deskew)
     print('\t')
 
 
 def images_to_text():
     print("processing images...")
-    images = glob.glob("%s\\*masked.jpg" % TEMP_DIR_IMPROC)
+    images = glob.glob("%s\\_masked*.jpg" % TEMP_DIR_IMPROC)
     print("found %d preprocessed images." % (len(images)))
     print("looking for text...")
     for image_path in tqdm(images, total=len(images), initial=1):
@@ -170,20 +245,20 @@ def clean_address(string):
 
 
 def text_to_csv(text, text_file_path):
-    if REGISTER_KEY_STRING in text:
-        with open(text_file_path) as f:
-            content = f.readlines()
-        content = [x.strip() for x in content]
-        content_filtered = []
-        chars = set('0123456789-~_')
-        for item in content:
-            if len(item) == 0:
-                continue
-            if any((c in chars) for c in item[0]):
-                data = clean_address(item)
-                input_file_id = text_file_path.split('\\')[-1].split('.')[0].split('_')[1]
-                id, marked, code = parse_row_data(data)
-                append_result_file(RESULT_FILE, id, marked, code, input_file_id)
+    # if REGISTER_KEY_STRING_1 in text:
+    with open(text_file_path) as f:
+        content = f.readlines()
+    content = [x.strip() for x in content]
+    content_filtered = []
+    chars = set('0123456789-~_')
+    for item in content:
+        if len(item) == 0:
+            continue
+        if any((c in chars) for c in item[0]):
+            data = clean_address(item)
+            input_file_id = text_file_path.split('\\')[-1].split('.')[0].split('_')[1]
+            id, marked, code = parse_row_data(data)
+            append_result_file(RESULT_FILE, id, marked, code, input_file_id)
 
 
 def parse_row_data(data):
@@ -212,13 +287,13 @@ def append_result_file(filename, id, marked, code, file):
 
 
 if __name__ == '__main__':
-    print("start...")
-    init_result_file()
-    files = glob.glob("C:\\greenparty\\*.pdf")
-    n_files = len(files)
-    print("found %d files in folder:\n%s" % (n_files, "\n".join(files)))
-    init_temp_folder()
-    pre_process_file(files)
-    pdf_to_images()
+    # print("start...")
+    # init_result_file()
+    # files = glob.glob("C:\\greenparty\\*.pdf")
+    # n_files = len(files)
+    # print("found %d files in folder:\n%s" % (n_files, "\n".join(files)))
+    # init_temp_folder()
+    # pre_process_file(files)
+    # pdf_to_images()
     pre_process_images()
     images_to_text()
