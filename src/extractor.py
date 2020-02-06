@@ -24,11 +24,14 @@ from numpy.linalg import lstsq
 import math
 import tesserocr as tr
 from PIL import Image
+from skimage.segmentation import clear_border
+from imutils import contours
+from pytesseract import Output
 import warnings
 warnings.filterwarnings("ignore")
 
-
-CHAR_TRAINING_DIR = "training"
+MAX_N_FILE_TRAIN = 5000
+CHAR_TRAINING_DIR = "training_000000"
 TEMP_DIR = "temp"
 TEMP_DIR_IMPROC = TEMP_DIR + '\\' + "improc"
 TEMP_DIR_IMPROC_ROWS = TEMP_DIR_IMPROC + '\\' + "rows"
@@ -228,13 +231,14 @@ def find_rows(result, image_path):
         text = api.GetUTF8Text()
         for i, (im, box, _, _) in enumerate(boxes):
             x, y, w, h = box['x'], box['y'], box['w'], box['h']
-            if h < 17 or h > 40:
+            if h < 17 or h > 50:
                 continue
             x = 0
             w = cv_img_1.shape[1]-10
             cv2.rectangle(cv_img_1, (x, y), (x + w, y + h), color=(0, 255, 0), thickness=2)
-            outpath = "%s\\%s_left_%03d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
+            outpath = "%s\\%s_left_%04d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
             roi = cv_img_1_o[y-5:y+h, x:x+w+5]
+            extract_chars(roi, image_path, i, 'left')
             io.imsave(outpath, roi.astype(np.uint8))
 
         pil_img = Image.fromarray(cv2.cvtColor(cv_img_2, cv2.COLOR_BGR2RGB))
@@ -243,13 +247,14 @@ def find_rows(result, image_path):
         text = api.GetUTF8Text()
         for i, (im, box, _, _) in enumerate(boxes):
             x, y, w, h = box['x'], box['y'], box['w'], box['h']
-            if h < 20 or h > 35:
+            if h < 20 or h > 50:
                 continue
             x = 0
             w = cv_img_1.shape[1]-10
             cv2.rectangle(cv_img_2, (x, y), (x + w, y + h), color=(0, 255, 0), thickness=3)
-            outpath = "%s\\%s_right_%03d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
+            outpath = "%s\\%s_right_%04d.jpg" % (TEMP_DIR_IMPROC_ROWS, image_path.split('\\')[-1].split('.')[0], i)
             roi = cv_img_2_o[y-5:y+h, x:x+w+5]
+            extract_chars(roi, image_path, i, 'right')
             io.imsave(outpath, roi.astype(np.uint8))
     finally:
         api.End()
@@ -284,8 +289,70 @@ def pre_process_images():
     print('\t')
 
 
-def extract_chars(image_path):
-    print(0)
+def extract_chars(image, image_path, i, location):
+    row = image.copy()
+    # height = img.shape[0]
+    # d = pytesseract.image_to_boxes(img, output_type=Output.DICT, config='hocr')
+    # n_boxes = len(d['char'])
+    # for i in range(n_boxes):
+    #     (text, x1, y2, x2, y1) = (d['char'][i], d['left'][i], d['top'][i], d['right'][i], d['bottom'][i])
+    #     cv2.rectangle(img, (x1, height - y1), (x2, height - y2), (0, 255, 0), 2)
+    # cv2.imshow('img', img)
+    # cv2.waitKey(0)
+    # api = tr.PyTessBaseAPI(path="C:\Program Files (x86)\Tesseract-OCR")
+    # try:
+    #     pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    #     api.SetImage(pil_img)
+    #     boxes = api.GetHOCRText(tr.RIL.TEXTLINE)
+    #     text = api.GetUTF8Text()
+    #     print(text)
+    #     h, w, _ = image.shape
+    #     for i, b in enumerate(boxes):
+    #          x = b[1]['x']
+    #          y = b[1]['y']
+    #          h = b[1]['h']
+    #          w = b[1]['w']
+    #          cv2.rectangle(image, (x, y), (x + w, y + h), color=(0, 255, 0), thickness=2)
+    # finally:
+    #     api.End()
+    # cv2.imshow('char', image)
+    # cv2.waitKey(0)
+
+    image_o = row.copy()
+    gray = cv2.cvtColor(row, cv2.COLOR_BGR2GRAY)
+    low_threshold = 50
+    high_threshold = 150
+    canny_img = cv2.Canny(gray, low_threshold, high_threshold)
+    contours, hierarchy = cv2.findContours(canny_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    try:
+        hierarchy = hierarchy[0]
+    except:
+        hierarchy = []
+
+    height, width = canny_img.shape
+    min_x, min_y = width, height
+    max_x = max_y = 0
+
+    # computes the bounding box for the contour, and draws it on the frame,
+    for j, (contour, hier) in enumerate(zip(contours, hierarchy)):
+        (x, y, w, h) = cv2.boundingRect(contour)
+        if x > 300:
+            continue
+        # print(x)
+        min_x, max_x = min(x, min_x), max(x + w, max_x)
+        min_y, max_y = min(y, min_y), max(y + h, max_y)
+        cv2.rectangle(row, (x, y), (x + w, y + h), (255, 0, 0), 1)
+        global CHAR_TRAINING_DIR
+        n_files = len(glob.glob("%s\\*.jpg" % CHAR_TRAINING_DIR))
+        if n_files > MAX_N_FILE_TRAIN:
+            CHAR_TRAINING_DIR = "%s_%06d" % (CHAR_TRAINING_DIR.split('_')[0], int(CHAR_TRAINING_DIR.split('_')[1])+1)
+            pathlib.Path(CHAR_TRAINING_DIR).mkdir(parents=True, exist_ok=True)
+
+        outpath = "%s\\%s_%s_char_%06d_%06d.jpg" % (CHAR_TRAINING_DIR, location, image_path.split('\\')[-1].split('.')[0], i, j)
+        roi = image_o[y:y + h, x:x + w]
+        io.imsave(outpath, roi.astype(np.uint8))
+    # cv2.imshow('char', row)
+    # cv2.waitKey(0)
 
 
 def build_training_set_from_rows():
