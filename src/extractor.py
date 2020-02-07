@@ -282,8 +282,8 @@ def pre_process_images():
     print("pre processing images...")
     images = glob.glob("%s\\*.jpg" % TEMP_DIR)
     print("found %d images in temp folder." % (len(images)))
-    # for image_path in tqdm(images, total=len(images), initial=1):
-    for image_path in images:
+    for image_path in tqdm(images, total=len(images), initial=1):
+    # for image_path in images:
         image_path_deskew = correct_skew(image_path)
         mask_data_to_ignore(image_path_deskew)
     print('\t')
@@ -447,4 +447,4 @@ if __name__ == '__main__':
     # pre_process_file(files)
     # pdf_to_images()
     pre_process_images()
-    images_to_text()
+    # images_to_text()
